@@ -125,7 +125,7 @@ For render or terminal-output changes, compare smoke output against the committe
 - Add CLI options through `OPTION_SPECS` first, then implement behavior.
 - Keep `--help` text generated from `OPTION_SPECS`; do not add hand-maintained option lists inside `cli.rs`.
 - Keep raw frame strings inside `animation.rs`.
-- Keep unsafe code inside `sys.rs`.
+- Keep unsafe code inside `sys.rs`. This is compiler-enforced: the crate root carries `#![deny(unsafe_code)]` and only `mod sys` is `#[allow(unsafe_code)]`.
 - Keep terminal cleanup behavior centralized in `runtime.rs`.
 - Keep telnet parser/state logic independently testable.
 - Update `ARCHITECTURE.md` when a module takes on a new responsibility.

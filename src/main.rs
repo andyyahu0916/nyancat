@@ -1,7 +1,11 @@
+// All FFI and unsafe code is confined to sys.rs; the compiler enforces it.
+#![deny(unsafe_code)]
+
 mod animation;
 mod cli;
 mod render;
 mod runtime;
+#[allow(unsafe_code)]
 mod sys;
 mod telnet;
 mod terminal;
