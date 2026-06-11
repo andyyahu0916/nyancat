@@ -4,6 +4,9 @@ Description=nyancat socket
 [Socket]
 ListenStream=23
 Accept=true
+# One animation process per connection; stop a single source from hogging
+# the per-unit connection budget (MaxConnections defaults to 64).
+MaxConnectionsPerSource=8
 
 [Install]
 WantedBy=sockets.target

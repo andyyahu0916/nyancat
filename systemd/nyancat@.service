@@ -3,10 +3,37 @@ Description=nyancat
 Documentation=man:nyancat(1)
 
 [Service]
-User=nobody
 ExecStart=-/usr/bin/nyancat -t
 StandardInput=socket
 StandardOutput=socket
 
-[Install]
-WantedBy=multi-user.target
+# The process only animates over the socket on stdin/stdout: no filesystem
+# writes, no devices, no new sockets, no privileges. Sandbox accordingly.
+# (PrivateNetwork is safe with socket activation: the accepted connection fd
+# is inherited and keeps working inside the private network namespace.)
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=none
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
