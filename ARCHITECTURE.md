@@ -31,7 +31,7 @@ This document records the current module boundaries and the design constraints t
 | `animation.rs` | Raw frame data, frame dimensions, `FrameSymbol`, and frame symbol accessors. |
 | `cli.rs` | `Config`, crop option types, CLI actions, CLI errors, and option parsing. |
 | `terminal.rs` | Positive terminal size type, terminal size detection adapter, and terminal type classification. |
-| `telnet.rs` | Telnet parser, negotiation state, byte-source abstraction, and negotiated terminal metadata. |
+| `telnet.rs` | Telnet parser, negotiation state, byte-source abstraction, negotiated terminal metadata, and mid-session input draining (`SessionInput`). |
 | `render.rs` | Render orchestration, `RenderState`, frame composition, intro output, resize handling, and `RunOutcome`. |
 | `render/palette.rs` | Terminal-specific palette tables and O(1) frame-symbol lookup. |
 | `render/frame_buffer.rs` | Reusable frame byte buffer, telnet newline conversion, and frame prefix helpers. |
@@ -51,7 +51,7 @@ CLI arguments become `cli::Config`. `main.rs` combines `Config`, terminal metada
 
 `render::run` repeatedly:
 
-1. Updates terminal size after resize signals when not in telnet mode.
+1. Updates terminal size after resize signals (local SIGWINCH) or, in telnet mode, after a mid-session NAWS update drained from the client between frames.
 2. Clears and prefixes a reusable `render::frame_buffer::FrameBuffer`.
 3. Calls `Renderer::render_frame`.
 4. Writes the buffer to stdout and flushes.
@@ -85,6 +85,7 @@ Telnet support is intentionally synchronous:
 - `TelnetNegotiation` handles typed command / option state transitions and output bytes.
 - `ByteSource` lets tests drive negotiation with scripted input.
 - `TimeoutReader` is the production stdin/poll source.
+- `SessionInput` drains client bytes between frames after negotiation: mid-session NAWS updates reflow the animation (with the same one-shot screen clear as a local resize), and EOF or a failed read ends the session cleanly. Reads are capped per frame so a flooding client cannot starve rendering. This is a **fork-specific divergence** — the historical C implementation never reads the connection after negotiation, so client resizes were ignored and client bytes accumulated unread.
 
 Do not introduce async unless the deployment model changes. The current tool speaks telnet over stdin/stdout for socket activation, inetd, or similar supervisors.
 

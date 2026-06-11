@@ -6,6 +6,7 @@ mod render_loop;
 use crate::animation::{FRAME_HEIGHT, FRAME_WIDTH, FrameSymbol, frame_row};
 use crate::cli::{AxisCrop, AxisRange, Config};
 use crate::runtime::take_resize_pending;
+use crate::telnet::{SessionEvent, SessionInput};
 use crate::terminal::{TerminalSize, terminal_size};
 pub(crate) use benchmark::BenchmarkReport;
 use benchmark::BenchmarkTracker;
@@ -80,7 +81,9 @@ impl RenderState {
 }
 
 pub(crate) enum RunOutcome {
-    FrameLimitReached {
+    /// The run ended cleanly: the frame limit was reached, or the telnet
+    /// client disconnected.
+    Finished {
         clear_screen: bool,
         benchmark: Option<BenchmarkReport>,
     },
@@ -308,14 +311,20 @@ pub(crate) fn run(
     let mut render_loop = RenderLoop::new(config.delay);
     let mut buffer = FrameBuffer::with_capacity(32 * 1024);
     let mut benchmark = config.benchmark.then(BenchmarkTracker::new);
+    let mut telnet_input = config.telnet.then(SessionInput::new);
+    let mut telnet_resized = false;
 
     loop {
         let frame_start = Instant::now();
 
-        let resized = !config.telnet && take_resize_pending();
-        if resized {
+        let resized = if config.telnet {
+            std::mem::take(&mut telnet_resized)
+        } else if take_resize_pending() {
             state.update_terminal_size(terminal_size());
-        }
+            true
+        } else {
+            false
+        };
 
         buffer.clear();
         if resized && config.clear_screen {
@@ -339,10 +348,29 @@ pub(crate) fn run(
         }
 
         if render_loop.finish_frame(frame_start, config.frame_limit) {
-            return Ok(RunOutcome::FrameLimitReached {
+            return Ok(RunOutcome::Finished {
                 clear_screen: config.clear_screen,
                 benchmark: benchmark.map(BenchmarkTracker::finish),
             });
+        }
+
+        // After the frame is out, drain any client input that arrived during
+        // it. Placed after the frame-limit check so finite runs (smoke tests,
+        // goldens) never depend on stdin state.
+        if let Some(input) = &mut telnet_input {
+            match input.poll() {
+                Some(SessionEvent::Resize(size)) => {
+                    state.update_terminal_size(size);
+                    telnet_resized = true;
+                }
+                Some(SessionEvent::Disconnected) => {
+                    return Ok(RunOutcome::Finished {
+                        clear_screen: config.clear_screen,
+                        benchmark: benchmark.map(BenchmarkTracker::finish),
+                    });
+                }
+                None => {}
+            }
         }
     }
 }

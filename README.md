@@ -13,7 +13,7 @@
 - **Terminal rendering** - Works in any ANSI-compatible terminal
 - **TrueColor support** - Optional 24-bit high-definition rendering mode
 - **Benchmark mode** - Zero-delay rendering for performance testing
-- **Telnet mode** - Share Nyancat over the network through socket activation or inetd
+- **Telnet mode** - Share Nyancat over the network through socket activation or inetd; the animation reflows live when the client window resizes
 - **Cross-platform** - Supports Linux, macOS, BSD, and other Unix-like systems
 - **Minimal dependencies** - No external crates required
 

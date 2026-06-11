@@ -85,7 +85,7 @@ fn main() -> ExitCode {
     let mut run_error = None;
 
     let exit_code = match run(config, state, palette) {
-        Ok(RunOutcome::FrameLimitReached {
+        Ok(RunOutcome::Finished {
             clear_screen,
             benchmark,
         }) => {

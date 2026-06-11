@@ -127,6 +127,74 @@ impl ByteSource for TimeoutReader {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionEvent {
+    Resize(TerminalSize),
+    Disconnected,
+}
+
+/// Drains client bytes between frames after negotiation has finished, so a
+/// telnet client's mid-session window resizes (NAWS) reflow the animation and
+/// a closed connection ends the session instead of piling up unread input.
+/// The historical C implementation never reads the connection after
+/// negotiation; this is a fork-specific improvement.
+pub(crate) struct SessionInput {
+    parser: TelnetParser,
+}
+
+/// Upper bound on stdin reads drained per frame, so a flooding client cannot
+/// starve rendering; whatever remains waits in the kernel buffer.
+const MAX_READS_PER_POLL: usize = 4;
+
+impl SessionInput {
+    pub(crate) fn new() -> Self {
+        Self {
+            parser: TelnetParser::new(),
+        }
+    }
+
+    /// Parses a chunk of client bytes and returns the last valid window-size
+    /// update it contains, if any. Other telnet traffic is consumed for
+    /// framing but otherwise ignored.
+    fn feed(&mut self, bytes: &[u8]) -> Option<TerminalSize> {
+        let mut resized = None;
+        for &byte in bytes {
+            if let Some(TelnetEvent::Subnegotiation(payload)) = self.parser.push(byte) {
+                if let Some(Subnegotiation::WindowSize(size)) = parse_subnegotiation(&payload) {
+                    resized = Some(size);
+                }
+            }
+        }
+        resized
+    }
+
+    /// Non-blocking drain of pending client input. EOF, read failures, and
+    /// poll failures on stdin all mean the client is gone, which ends the
+    /// session cleanly rather than surfacing as a runtime error.
+    pub(crate) fn poll(&mut self) -> Option<SessionEvent> {
+        let mut buffer = [0u8; 1024];
+        let mut resized = None;
+
+        for _ in 0..MAX_READS_PER_POLL {
+            match sys::stdin_readiness(sys::PollTimeout::from_duration(Duration::ZERO)) {
+                Ok(sys::PollReadiness::Ready) => match sys::read_stdin(&mut buffer) {
+                    Ok(sys::StdinRead::Bytes(count)) => {
+                        if let Some(size) = self.feed(&buffer[..count]) {
+                            resized = Some(size);
+                        }
+                    }
+                    Ok(sys::StdinRead::Eof) | Err(_) => return Some(SessionEvent::Disconnected),
+                    Ok(sys::StdinRead::Interrupted) => break,
+                },
+                Ok(sys::PollReadiness::Timeout) | Ok(sys::PollReadiness::Interrupted) => break,
+                Err(_) => return Some(SessionEvent::Disconnected),
+            }
+        }
+
+        resized.map(SessionEvent::Resize)
+    }
+}
+
 struct TelnetState {
     options: OptionCommandTable,
     willack: OptionCommandTable,
@@ -920,6 +988,66 @@ mod tests {
             &output,
             &option_command(TelnetCommand::Do, TelnetOption::NAWS)
         ));
+    }
+
+    fn naws(width_hi: u8, width_lo: u8, height_hi: u8, height_lo: u8) -> Vec<u8> {
+        vec![
+            IAC,
+            command(TelnetCommand::Sb),
+            option(TelnetOption::NAWS),
+            width_hi,
+            width_lo,
+            height_hi,
+            height_lo,
+            IAC,
+            command(TelnetCommand::Se),
+        ]
+    }
+
+    #[test]
+    fn session_input_extracts_window_size_updates() {
+        let mut input = SessionInput::new();
+
+        assert_eq!(input.feed(b"random keystrokes"), None);
+        assert_eq!(
+            input.feed(&naws(0, 80, 0, 24)),
+            Some(TerminalSize::new(80, 24))
+        );
+
+        // The last update in a chunk wins.
+        let mut chunk = naws(0, 100, 0, 40);
+        chunk.extend(naws(0, 50, 0, 20));
+        assert_eq!(input.feed(&chunk), Some(TerminalSize::new(50, 20)));
+    }
+
+    #[test]
+    fn session_input_handles_split_and_invalid_updates() {
+        let mut input = SessionInput::new();
+
+        // A NAWS sequence split across reads parses once complete.
+        let bytes = naws(0, 120, 0, 40);
+        let (head, tail) = bytes.split_at(4);
+        assert_eq!(input.feed(head), None);
+        assert_eq!(input.feed(tail), Some(TerminalSize::new(120, 40)));
+
+        // Zero and out-of-bounds dimensions are rejected at the boundary.
+        assert_eq!(input.feed(&naws(0, 0, 0, 24)), None);
+        assert_eq!(input.feed(&naws(0xff, 0xff, 0, 24)), None);
+
+        // Non-NAWS subnegotiations are consumed but ignored.
+        assert_eq!(
+            input.feed(&[
+                IAC,
+                command(TelnetCommand::Sb),
+                option(TelnetOption::TTYPE),
+                0,
+                b'v',
+                b't',
+                IAC,
+                command(TelnetCommand::Se),
+            ]),
+            None
+        );
     }
 
     struct Rng(u64);
