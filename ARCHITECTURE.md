@@ -119,7 +119,9 @@ The baseline for behavior changes is:
 - `cargo build --release`
 - Smoke paths from `RELEASE_CHECKLIST.md`
 
-For render or terminal-output changes, compare smoke output against the committed goldens and inspect whether changed bytes are intentional.
+`cargo test` includes a loopback TCP integration test that launches the real binary, negotiates telnet metadata, applies a mid-session NAWS resize, and exercises orderly client half-close. Injected-source unit tests ensure both poll and read errors propagate unchanged. `scripts/pty_resize_smoke.py` runs the release binary in a real controlling PTY and changes its window size through `TIOCSWINSZ`, covering the kernel SIGWINCH, stdout ioctl, reflow, and terminal-restore path on Linux and macOS. The release gate also gives telnet mode a write-only stdin descriptor to ensure a real `EBADF` read remains a reported process error.
+
+For render or terminal-output changes, compare smoke output against the committed goldens and inspect whether changed bytes are intentional. Keep network tests on loopback with ephemeral ports, and do not replace the PTY smoke with a manually delivered signal that would bypass the kernel resize path.
 
 ## Extension Guidelines
 

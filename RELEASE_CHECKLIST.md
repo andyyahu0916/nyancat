@@ -22,15 +22,15 @@ scripts/release_check.sh
 The script covers:
 
 - `cargo fmt --check`
-- `cargo test --locked`, including CLI option coverage for `README.md` and `nyancat.1`
+- `cargo test --locked`, including CLI documentation checks and real loopback telnet integration tests
 - `cargo clippy --locked --all-targets --all-features -- -D warnings`
 - `cargo build --release --locked`
-- `sh -n` syntax checks for release helper scripts
+- shell and Python syntax checks for release helper scripts
 - `cargo package --list --allow-dirty --locked`, including expected release files and excluding local-only dotfiles
 - `scripts/release_archive.sh` with a temporary dist directory, followed by archive content checks
-- Smoke tests with exact golden comparisons, alternate-screen restore markers, CLI/telnet write-error checks, and `--help` option coverage
+- Smoke tests with exact golden comparisons, a real PTY resize, alternate-screen restore markers, CLI/telnet I/O-error checks, and `--help` option coverage
 
-GitHub Actions also runs the release check on stable Rust, a separate MSRV build/test job for Rust 1.85.0, and macOS test/build/smoke coverage against the committed goldens.
+GitHub Actions also runs the release check on stable Rust, a separate MSRV build/test job for Rust 1.85.0, and macOS test/build coverage against the committed goldens plus the real PTY resize smoke.
 The release workflow requires a tag matching `v${Cargo.toml version}`, builds Linux and macOS archives before publishing, and attaches a `SHA256SUMS` file. Failed drafts can be rebuilt, but an already published release is immutable and the workflow refuses to replace its live assets.
 
 If you need to run the steps manually, use the commands in the sections below.
@@ -82,10 +82,12 @@ The automated smoke checks also verify key output markers:
 - xterm output uses 256-color escape sequences and does not emit TrueColor sequences.
 - TrueColor output uses 24-bit escape sequences and does not emit 256-color sequences.
 - telnet output starts with negotiation bytes and uses CR NUL LF newline markers.
+- loopback TCP tests launch the real binary, reflow from an 80x24 to a 40x10 NAWS viewport, and treat a client write-half-close as an orderly disconnect.
 - `--no-counter` smoke paths do not print counter text.
 - clear-screen startup enters and restores the alternate screen; SIGTERM smokes verify signal-path restore and status 143 even when stdout closes during cleanup.
+- the PTY smoke changes a controlling terminal from 80x24 to 40x10 and verifies kernel-delivered SIGWINCH reflow plus final restore bytes.
 - redirected help and benchmark diagnostics do not contain terminal styling.
-- genuine local and telnet negotiation write failures return non-zero.
+- genuine local/telnet write failures and an invalid telnet input descriptor return non-zero.
 
 ## Benchmarking
 
@@ -139,7 +141,7 @@ For comparable render-throughput measurements, build in release mode and redirec
 - Confirm the repository does not track `.cargo/config.toml`; release archives must not be compiled with local `target-cpu=native` rustflags.
 - Confirm `nyancat.1` documents all public CLI options; `cargo test` also checks README/manpage option names against `OPTION_SPECS`.
 - Confirm `systemd/nyancat.socket` and `systemd/nyancat@.service` still reference the intended binary path and socket behavior.
-- Confirm `cargo package --list --locked` contains the expected user docs, release scripts, golden smoke fixtures, source files, manpage, and systemd files.
+- Confirm `cargo package --list --locked` contains the expected user docs, release scripts, PTY smoke, telnet integration test, golden fixtures, source files, manpage, and systemd files.
 - Confirm the package list excludes local-only files such as `.codex`, `.cargo/config.toml`, and GitHub Actions workflow metadata.
 - Confirm release artifacts are built from a clean checkout or a clean working tree; `scripts/release_check.sh` builds a temporary archive and verifies its contents.
 - Confirm the GitHub Release contains both platform archives and `SHA256SUMS`.

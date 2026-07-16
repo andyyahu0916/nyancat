@@ -98,6 +98,11 @@ jobs:
       - name: Test tagged source
         run: cargo test --locked
 
+      - name: Build and exercise PTY resize handling
+        run: |
+          cargo build --release --locked
+          python3 scripts/pty_resize_smoke.py target/release/nyancat
+
       - name: Build release archive
         id: archive
         run: |

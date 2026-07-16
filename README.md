@@ -148,6 +148,7 @@ nyancat -T
 ### Prerequisites
 
 - Rust 1.85+ (2024 edition)
+- Python 3 (standard library only, for the release/PTY verification gate)
 
 ### Build
 
@@ -174,7 +175,8 @@ scripts/release_archive.sh
 - `src/terminal.rs` - Terminal size and type detection
 - `src/runtime.rs` - Exit and signal handling
 - `src/sys.rs` - Unix FFI bindings
-- `scripts/` - Release verification and benchmark helpers
+- `scripts/` - Release verification, PTY smoke, and benchmark helpers
+- `tests/` - Loopback telnet integration tests and byte-exact golden fixtures
 - `systemd/` - Systemd service files for telnet server integration
 
 ### Engineering docs

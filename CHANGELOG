@@ -24,6 +24,7 @@ Unreleased (Rust Edition)
         * Rejected unexpected positional arguments and invalid final crop ranges.
         * Restored terminal state on unwinding panics and preserved conventional signal status.
         * Made release publication wait for both platform artifacts and added SHA-256 checksums.
+        * Added real PTY resize and loopback telnet session regression tests.
     * DOCUMENTATION:
         * Updated README.md, nyancat.1, release checklist, architecture notes, and benchmark snapshots.
 

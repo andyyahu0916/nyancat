@@ -20,6 +20,9 @@ flag_value_err="$work_dir/flag-value-error.err"
 crop_err="$work_dir/crop-error.err"
 write_err="$work_dir/write-error.err"
 telnet_write_err="$work_dir/telnet-write-error.err"
+telnet_input_sink="$work_dir/telnet-invalid-input"
+telnet_input_out="$work_dir/telnet-input-error.out"
+telnet_input_err="$work_dir/telnet-input-error.err"
 help_out="$work_dir/help.out"
 package_list="$work_dir/package-list.out"
 archive_log="$work_dir/release-archive.log"
@@ -107,6 +110,7 @@ sh -n scripts/benchmark_matrix.sh
 sh -n scripts/benchmark_callgrind.sh
 sh -n scripts/release_archive.sh
 sh -n scripts/update_goldens.sh
+PYTHONPYCACHEPREFIX="$work_dir/pycache" python3 -m py_compile scripts/pty_resize_smoke.py
 
 echo "== cargo package list =="
 cargo package --list --allow-dirty --locked > "$package_list"
@@ -117,7 +121,9 @@ check_contains "$package_list" "scripts/benchmark_matrix.sh" "package benchmark 
 check_contains "$package_list" "scripts/benchmark_callgrind.sh" "package callgrind benchmark"
 check_contains "$package_list" "scripts/release_archive.sh" "package release archive helper"
 check_contains "$package_list" "scripts/release_check.sh" "package release check"
+check_contains "$package_list" "scripts/pty_resize_smoke.py" "package PTY resize smoke"
 check_contains "$package_list" "scripts/update_goldens.sh" "package goldens updater"
+check_contains "$package_list" "tests/telnet_socket.rs" "package telnet socket integration test"
 check_contains "$package_list" "tests/golden/normal.out" "package normal golden"
 check_contains "$package_list" "tests/golden/telnet.out" "package telnet golden"
 check_contains "$package_list" "tests/golden/truecolor.out" "package truecolor golden"
@@ -218,6 +224,8 @@ if [ "$pipe_signal_status" -ne 143 ]; then
     exit 1
 fi
 
+python3 scripts/pty_resize_smoke.py "$BIN"
+
 check_contains "$truecolor_out" "${esc}[s${esc}[u${esc}[48;2;0;49;105m" "truecolor frame prefix"
 check_contains "$truecolor_out" "${esc}[48;2;255;25;0m" "truecolor rainbow red"
 check_absent "$truecolor_out" "${esc}[48;5;" "256-color escape sequence"
@@ -299,5 +307,15 @@ if [ -c /dev/full ]; then
     fi
     grep -F "nyancat: " "$telnet_write_err" > /dev/null
 fi
+
+# Give stdin a write-only descriptor so poll reports it ready but read fails
+# with EBADF. This is distinct from an orderly EOF and must remain a visible
+# process error rather than a clean telnet disconnect.
+if "$BIN" --telnet --skip-intro --frames 1 --no-title --no-clear --no-counter \
+    3> "$telnet_input_sink" 0>&3 3>&- > "$telnet_input_out" 2> "$telnet_input_err"; then
+    echo "expected unreadable telnet input descriptor to exit non-zero" >&2
+    exit 1
+fi
+check_contains "$telnet_input_err" "nyancat: " "telnet input error"
 
 echo "release check passed"

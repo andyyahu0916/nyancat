@@ -15,7 +15,7 @@ include = [
     "/src/**",
     "/scripts/**",
     "/systemd/**",
-    "/tests/golden/**",
+    "/tests/**",
     "/ARCHITECTURE.md",
     "/CHANGELOG",
     "/Cargo.lock",

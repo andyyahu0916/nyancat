@@ -142,6 +142,23 @@ pub(crate) enum SessionEvent {
     Disconnected,
 }
 
+trait SessionSource {
+    fn readiness(&mut self) -> io::Result<sys::PollReadiness>;
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<sys::StdinRead>;
+}
+
+struct StdinSessionSource;
+
+impl SessionSource for StdinSessionSource {
+    fn readiness(&mut self) -> io::Result<sys::PollReadiness> {
+        sys::stdin_readiness(sys::PollTimeout::from_duration(Duration::ZERO))
+    }
+
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<sys::StdinRead> {
+        sys::read_stdin(buffer)
+    }
+}
+
 /// Drains client bytes between frames after negotiation has finished, so a
 /// telnet client's mid-session window resizes (NAWS) reflow the animation and
 /// a closed connection ends the session instead of piling up unread input.
@@ -180,12 +197,19 @@ impl SessionInput {
     /// Non-blocking drain of pending client input. EOF means the client
     /// disconnected cleanly; poll and read failures remain runtime errors.
     pub(crate) fn poll(&mut self) -> io::Result<Option<SessionEvent>> {
+        self.poll_with_source(&mut StdinSessionSource)
+    }
+
+    fn poll_with_source(
+        &mut self,
+        source: &mut impl SessionSource,
+    ) -> io::Result<Option<SessionEvent>> {
         let mut buffer = [0u8; 1024];
         let mut resized = None;
 
         for _ in 0..MAX_READS_PER_POLL {
-            match sys::stdin_readiness(sys::PollTimeout::from_duration(Duration::ZERO))? {
-                sys::PollReadiness::Ready => match sys::read_stdin(&mut buffer)? {
+            match source.readiness()? {
+                sys::PollReadiness::Ready => match source.read(&mut buffer)? {
                     sys::StdinRead::Bytes(count) => {
                         if let Some(size) = self.feed(&buffer[..count]) {
                             resized = Some(size);
@@ -1120,6 +1144,141 @@ mod tests {
         bytes.extend_from_slice(&naws_payload(width, height));
         bytes.extend_from_slice(&[IAC, command(TelnetCommand::Se)]);
         bytes
+    }
+
+    enum ScriptedSessionRead {
+        Bytes(Vec<u8>),
+        Eof,
+        Interrupted,
+        Error(io::Error),
+    }
+
+    struct ScriptedSessionSource {
+        readiness: std::collections::VecDeque<io::Result<sys::PollReadiness>>,
+        reads: std::collections::VecDeque<ScriptedSessionRead>,
+        read_calls: usize,
+    }
+
+    impl ScriptedSessionSource {
+        fn new(
+            readiness: Vec<io::Result<sys::PollReadiness>>,
+            reads: Vec<ScriptedSessionRead>,
+        ) -> Self {
+            Self {
+                readiness: readiness.into(),
+                reads: reads.into(),
+                read_calls: 0,
+            }
+        }
+    }
+
+    impl SessionSource for ScriptedSessionSource {
+        fn readiness(&mut self) -> io::Result<sys::PollReadiness> {
+            self.readiness
+                .pop_front()
+                .unwrap_or(Ok(sys::PollReadiness::Timeout))
+        }
+
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<sys::StdinRead> {
+            self.read_calls += 1;
+            match self.reads.pop_front().expect("unexpected scripted read") {
+                ScriptedSessionRead::Bytes(bytes) => {
+                    assert!(bytes.len() <= buffer.len());
+                    buffer[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(sys::StdinRead::Bytes(bytes.len()))
+                }
+                ScriptedSessionRead::Eof => Ok(sys::StdinRead::Eof),
+                ScriptedSessionRead::Interrupted => Ok(sys::StdinRead::Interrupted),
+                ScriptedSessionRead::Error(error) => Err(error),
+            }
+        }
+    }
+
+    #[test]
+    fn session_poll_propagates_readiness_errors_exactly() {
+        let expected = io::Error::new(io::ErrorKind::PermissionDenied, "readiness sentinel");
+        let mut source = ScriptedSessionSource::new(vec![Err(expected)], Vec::new());
+        let mut input = SessionInput::new();
+
+        let error = input.poll_with_source(&mut source).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "readiness sentinel");
+        assert_eq!(source.read_calls, 0);
+    }
+
+    #[test]
+    fn session_poll_propagates_read_errors_exactly() {
+        let expected = io::Error::new(io::ErrorKind::InvalidData, "read sentinel");
+        let mut source = ScriptedSessionSource::new(
+            vec![Ok(sys::PollReadiness::Ready)],
+            vec![ScriptedSessionRead::Error(expected)],
+        );
+        let mut input = SessionInput::new();
+
+        let error = input.poll_with_source(&mut source).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "read sentinel");
+        assert_eq!(source.read_calls, 1);
+    }
+
+    #[test]
+    fn session_poll_reports_eof_as_disconnect() {
+        let mut source = ScriptedSessionSource::new(
+            vec![Ok(sys::PollReadiness::Ready)],
+            vec![ScriptedSessionRead::Eof],
+        );
+        let mut input = SessionInput::new();
+
+        assert_eq!(
+            input.poll_with_source(&mut source).unwrap(),
+            Some(SessionEvent::Disconnected)
+        );
+        assert_eq!(source.read_calls, 1);
+    }
+
+    #[test]
+    fn session_poll_stops_cleanly_when_readiness_or_read_is_interrupted() {
+        let mut readiness_interrupted =
+            ScriptedSessionSource::new(vec![Ok(sys::PollReadiness::Interrupted)], Vec::new());
+        let mut read_interrupted = ScriptedSessionSource::new(
+            vec![Ok(sys::PollReadiness::Ready)],
+            vec![ScriptedSessionRead::Interrupted],
+        );
+
+        assert_eq!(
+            SessionInput::new()
+                .poll_with_source(&mut readiness_interrupted)
+                .unwrap(),
+            None
+        );
+        assert_eq!(readiness_interrupted.read_calls, 0);
+        assert_eq!(
+            SessionInput::new()
+                .poll_with_source(&mut read_interrupted)
+                .unwrap(),
+            None
+        );
+        assert_eq!(read_interrupted.read_calls, 1);
+    }
+
+    #[test]
+    fn session_poll_parses_bytes_from_injected_source() {
+        let mut source = ScriptedSessionSource::new(
+            vec![
+                Ok(sys::PollReadiness::Ready),
+                Ok(sys::PollReadiness::Timeout),
+            ],
+            vec![ScriptedSessionRead::Bytes(naws(80, 24))],
+        );
+        let mut input = SessionInput::new();
+
+        assert_eq!(
+            input.poll_with_source(&mut source).unwrap(),
+            Some(SessionEvent::Resize(TerminalSize::new(80, 24)))
+        );
+        assert_eq!(source.read_calls, 1);
     }
 
     #[test]

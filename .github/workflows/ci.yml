@@ -73,6 +73,9 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
+      - name: Exercise PTY resize handling
+        run: python3 scripts/pty_resize_smoke.py target/release/nyancat
+
       # Rendering is pure computation, so a macOS-built binary must produce
       # byte-identical output to the committed goldens. This exercises the
       # macOS-specific ioctl/FFI path in sys.rs and validates the cross-platform

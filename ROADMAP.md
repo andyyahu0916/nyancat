@@ -28,7 +28,7 @@
 - telnet negotiation 拆成 parser、state machine、subnegotiation parser 和 `ByteSource`；command / option 已型別化，未知 option 仍以 raw byte newtype 保留並可測。
 - 遠端 NAWS 已在 protocol boundary 加入寬、高與 viewport area budget；mid-session poll/read error 不再一律吞成正常斷線。
 - `TerminalSession` 用 RAII restore terminal；Unix FFI 和 signal path 集中在 `sys.rs` / `runtime.rs`，stdin poll/read 回傳 typed outcomes 而不是吞成 bool / `Option`。
-- release gate、output smoke golden checks、benchmark report、benchmark matrix 和 CI/MSRV/macOS jobs 已建立。
+- release gate、output smoke golden checks、真實 PTY resize、loopback telnet integration、benchmark report、benchmark matrix 和 CI/MSRV/macOS jobs 已建立。
 
 仍保留的條件式方向：
 
@@ -58,6 +58,7 @@
 
 - 保留 golden smoke，因為它便宜且能抓到完整輸出漂移；golden 檔案本身包含 terminal output 的空白與控制碼，更新時必須 review diff。
 - 維護 release smoke 的關鍵 marker 檢查，覆蓋 xterm / truecolor / telnet newline / no-counter 行為。
+- 保留真實 controlling PTY 的 SIGWINCH reflow smoke，以及以 ephemeral loopback TCP 驗證 NAWS resize / orderly disconnect 的 integration tests。
 - 若未來 golden fixture 太脆弱，再補更細的 semantic output verifier。
 
 完成標準：
