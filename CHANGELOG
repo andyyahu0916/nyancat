@@ -1,4 +1,5 @@
-1.6.0 (Rust Edition) - 2026-05-01
+Unreleased (Rust Edition)
+    * The Rust rewrite has not yet received a versioned release tag.
     * COMPLETE REWRITE IN RUST:
         * Significant performance improvements with repeatable benchmark reporting.
         * Memory-safe rendering using Rust idiomatic patterns.
@@ -9,6 +10,20 @@
     * OPTIMIZATIONS:
         * Enabled LTO and aggressive release optimizations.
         * Pre-computed ANSI color palettes for faster rendering.
+    * MAY 2026:
+        * Added --version, bounded crop and terminal dimensions, and improved 256-color detection.
+        * Added NO_COLOR support for monochrome output.
+        * Switched interactive sessions to the alternate screen and restored the terminal on more signals.
+        * Fixed rendering at the right edge and when the terminal is resized.
+    * JUNE 2026:
+        * Telnet sessions now reflow the animation when the client window changes size.
+        * Hardened the included systemd telnet service with security sandboxing.
+    * JULY 2026:
+        * Bounded remote telnet window reports and corrected unsupported-option negotiation.
+        * Preserved genuine telnet I/O failures instead of reporting every disconnect as success.
+        * Rejected unexpected positional arguments and invalid final crop ranges.
+        * Restored terminal state on unwinding panics and preserved conventional signal status.
+        * Made release publication wait for both platform artifacts and added SHA-256 checksums.
     * DOCUMENTATION:
         * Updated README.md, nyancat.1, release checklist, architecture notes, and benchmark snapshots.
 

@@ -7,6 +7,15 @@ const IAC: u8 = 255;
 const SEND: u8 = 1;
 const TELNET_OPTION_COUNT: usize = 256;
 
+// NAWS is controlled by the remote peer and directly affects per-frame work
+// and buffer growth. These limits are deliberately much larger than a normal
+// interactive terminal while keeping one reported viewport bounded. The area
+// budget is width * height; rendering uses roughly width / 2 * height cells,
+// so its actual cell count is lower still.
+const MAX_NAWS_WIDTH: u16 = 512;
+const MAX_NAWS_HEIGHT: u16 = 256;
+const MAX_NAWS_VIEWPORT_AREA: u32 = 65_536;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TelnetCommand {
     Se,
@@ -168,30 +177,28 @@ impl SessionInput {
         resized
     }
 
-    /// Non-blocking drain of pending client input. EOF, read failures, and
-    /// poll failures on stdin all mean the client is gone, which ends the
-    /// session cleanly rather than surfacing as a runtime error.
-    pub(crate) fn poll(&mut self) -> Option<SessionEvent> {
+    /// Non-blocking drain of pending client input. EOF means the client
+    /// disconnected cleanly; poll and read failures remain runtime errors.
+    pub(crate) fn poll(&mut self) -> io::Result<Option<SessionEvent>> {
         let mut buffer = [0u8; 1024];
         let mut resized = None;
 
         for _ in 0..MAX_READS_PER_POLL {
-            match sys::stdin_readiness(sys::PollTimeout::from_duration(Duration::ZERO)) {
-                Ok(sys::PollReadiness::Ready) => match sys::read_stdin(&mut buffer) {
-                    Ok(sys::StdinRead::Bytes(count)) => {
+            match sys::stdin_readiness(sys::PollTimeout::from_duration(Duration::ZERO))? {
+                sys::PollReadiness::Ready => match sys::read_stdin(&mut buffer)? {
+                    sys::StdinRead::Bytes(count) => {
                         if let Some(size) = self.feed(&buffer[..count]) {
                             resized = Some(size);
                         }
                     }
-                    Ok(sys::StdinRead::Eof) | Err(_) => return Some(SessionEvent::Disconnected),
-                    Ok(sys::StdinRead::Interrupted) => break,
+                    sys::StdinRead::Eof => return Ok(Some(SessionEvent::Disconnected)),
+                    sys::StdinRead::Interrupted => break,
                 },
-                Ok(sys::PollReadiness::Timeout) | Ok(sys::PollReadiness::Interrupted) => break,
-                Err(_) => return Some(SessionEvent::Disconnected),
+                sys::PollReadiness::Timeout | sys::PollReadiness::Interrupted => break,
             }
         }
 
-        resized.map(SessionEvent::Resize)
+        Ok(resized.map(SessionEvent::Resize))
     }
 }
 
@@ -216,6 +223,10 @@ impl OptionCommandTable {
 
     fn set(&mut self, option: TelnetOption, command: TelnetCommand) {
         self.0[option.index()] = Some(command);
+    }
+
+    fn clear(&mut self, option: TelnetOption) {
+        self.0[option.index()] = None;
     }
 
     fn get_or_set(&mut self, option: TelnetOption, command: TelnetCommand) -> TelnetCommand {
@@ -303,11 +314,21 @@ fn parse_subnegotiation(bytes: &[u8]) -> Option<Subnegotiation> {
         Some(TelnetOption::TTYPE) if bytes.len() >= 2 => Some(Subnegotiation::TerminalType(
             String::from_utf8_lossy(&bytes[2..]).into_owned(),
         )),
-        Some(TelnetOption::NAWS) if bytes.len() >= 5 => TerminalSize::try_new(
-            u16::from_be_bytes([bytes[1], bytes[2]]) as i32,
-            u16::from_be_bytes([bytes[3], bytes[4]]) as i32,
-        )
-        .map(Subnegotiation::WindowSize),
+        Some(TelnetOption::NAWS) if bytes.len() >= 5 => {
+            let width = u16::from_be_bytes([bytes[1], bytes[2]]);
+            let height = u16::from_be_bytes([bytes[3], bytes[4]]);
+            let viewport_area = u32::from(width) * u32::from(height);
+
+            if width > MAX_NAWS_WIDTH
+                || height > MAX_NAWS_HEIGHT
+                || viewport_area > MAX_NAWS_VIEWPORT_AREA
+            {
+                return None;
+            }
+
+            TerminalSize::try_new(i32::from(width), i32::from(height))
+                .map(Subnegotiation::WindowSize)
+        }
         _ => None,
     }
 }
@@ -441,7 +462,7 @@ impl TelnetParser {
 #[derive(Debug, Default, Eq, PartialEq)]
 struct NegotiationStep {
     output: Vec<u8>,
-    extend_deadline: bool,
+    made_progress: bool,
 }
 
 struct TelnetNegotiation {
@@ -499,13 +520,13 @@ impl TelnetNegotiation {
                     self.handle_will_wont(command, option, &mut step.output)
                 }
                 TelnetCommand::Do | TelnetCommand::Dont => {
-                    self.handle_do_dont(option, &mut step.output)
+                    self.handle_do_dont(command, option, &mut step.output)
                 }
                 _ => {}
             },
             TelnetEvent::Subnegotiation(bytes) => {
                 if self.handle_subnegotiation(&bytes) {
-                    step.extend_deadline = true;
+                    step.made_progress = true;
                 }
             }
         }
@@ -519,7 +540,15 @@ impl TelnetNegotiation {
         option: TelnetOption,
         output: &mut Vec<u8>,
     ) {
-        let response = self.state.willack.get_or_set(option, TelnetCommand::Wont);
+        if command == TelnetCommand::Wont {
+            // WONT is already the negative state; acknowledge it silently and
+            // clear the transmit cache so a later WILL gets a fresh policy
+            // response instead of being mistaken for an old acknowledgement.
+            self.state.do_set.clear(option);
+            return;
+        }
+
+        let response = self.state.willack.get_or_set(option, TelnetCommand::Dont);
         self.state.push_option_command(output, response, option);
 
         if command == TelnetCommand::Will && option == TelnetOption::TTYPE {
@@ -534,22 +563,35 @@ impl TelnetNegotiation {
         }
     }
 
-    fn handle_do_dont(&mut self, option: TelnetOption, output: &mut Vec<u8>) {
-        let response = self.state.options.get_or_set(option, TelnetCommand::Dont);
+    fn handle_do_dont(
+        &mut self,
+        command: TelnetCommand,
+        option: TelnetOption,
+        output: &mut Vec<u8>,
+    ) {
+        if command == TelnetCommand::Dont {
+            // As above, a negative command needs no negative acknowledgement.
+            self.state.will_set.clear(option);
+            return;
+        }
+
+        let response = self.state.options.get_or_set(option, TelnetCommand::Wont);
         self.state.push_option_command(output, response, option);
     }
 
     fn handle_subnegotiation(&mut self, bytes: &[u8]) -> bool {
         match parse_subnegotiation(bytes) {
             Some(Subnegotiation::TerminalType(term)) => {
+                let made_progress = !self.got_ttype;
                 self.info.term = Some(term);
                 self.got_ttype = true;
-                true
+                made_progress
             }
             Some(Subnegotiation::WindowSize(size)) => {
+                let made_progress = !self.got_naws;
                 self.info.size = Some(size);
                 self.got_naws = true;
-                true
+                made_progress
             }
             None => false,
         }
@@ -586,7 +628,10 @@ fn negotiate_telnet_with_source(
             out.write_all(&step.output)?;
             out.flush()?;
         }
-        if step.extend_deadline {
+        // Only newly learned information earns more time. Repeating one valid
+        // subnegotiation while withholding the other cannot keep the session
+        // in negotiation forever.
+        if step.made_progress {
             deadline = Instant::now() + Duration::from_secs(2);
         }
     }
@@ -632,6 +677,18 @@ mod tests {
         ]
     }
 
+    fn naws_payload(width: u16, height: u16) -> [u8; 5] {
+        let [width_hi, width_lo] = width.to_be_bytes();
+        let [height_hi, height_lo] = height.to_be_bytes();
+        [
+            option(TelnetOption::NAWS),
+            width_hi,
+            width_lo,
+            height_hi,
+            height_lo,
+        ]
+    }
+
     struct ScriptedByteSource {
         bytes: Vec<u8>,
         position: usize,
@@ -664,9 +721,34 @@ mod tests {
     #[test]
     fn parses_window_size_subnegotiation() {
         assert_eq!(
-            parse_subnegotiation(&[option(TelnetOption::NAWS), 0, 120, 0, 40]),
+            parse_subnegotiation(&naws_payload(120, 40)),
             Some(Subnegotiation::WindowSize(TerminalSize::new(120, 40)))
         );
+    }
+
+    #[test]
+    fn accepts_window_sizes_at_remote_viewport_limits() {
+        for (width, height) in [(MAX_NAWS_WIDTH, 128), (256, MAX_NAWS_HEIGHT)] {
+            assert_eq!(
+                parse_subnegotiation(&naws_payload(width, height)),
+                Some(Subnegotiation::WindowSize(TerminalSize::new(width, height)))
+            );
+            assert_eq!(u32::from(width) * u32::from(height), MAX_NAWS_VIEWPORT_AREA);
+        }
+    }
+
+    #[test]
+    fn ignores_window_sizes_over_remote_viewport_limits() {
+        // Check each independent limit plus a pair that fits both axes but
+        // exceeds their combined area budget.
+        for (width, height) in [
+            (MAX_NAWS_WIDTH + 1, 1),
+            (1, MAX_NAWS_HEIGHT + 1),
+            (400, 200),
+            (10_000, 10_000),
+        ] {
+            assert_eq!(parse_subnegotiation(&naws_payload(width, height)), None);
+        }
     }
 
     #[test]
@@ -873,11 +955,11 @@ mod tests {
         });
 
         assert_eq!(step.output, terminal_type_send());
-        assert!(!step.extend_deadline);
+        assert!(!step.made_progress);
     }
 
     #[test]
-    fn unknown_options_remain_pass_through_and_are_rejected() {
+    fn unknown_options_receive_correct_negative_responses() {
         let unknown = TelnetOption::new(200);
         let mut negotiation = TelnetNegotiation::new();
         let _ = negotiation.initial_output();
@@ -887,14 +969,43 @@ mod tests {
             option: unknown,
         });
 
-        assert_eq!(step.output, option_command(TelnetCommand::Wont, unknown));
+        assert_eq!(step.output, option_command(TelnetCommand::Dont, unknown));
 
         let step = negotiation.handle_event(TelnetEvent::Negotiation {
             command: TelnetCommand::Do,
             option: unknown,
         });
 
+        assert_eq!(step.output, option_command(TelnetCommand::Wont, unknown));
+    }
+
+    #[test]
+    fn negative_option_commands_are_not_acknowledged() {
+        let unknown = TelnetOption::new(200);
+        let mut negotiation = TelnetNegotiation::new();
+        let _ = negotiation.initial_output();
+
+        for command in [TelnetCommand::Wont, TelnetCommand::Dont] {
+            let step = negotiation.handle_event(TelnetEvent::Negotiation {
+                command,
+                option: unknown,
+            });
+            assert!(step.output.is_empty());
+        }
+
+        // Clearing the transmit cache lets a later positive state transition
+        // receive the appropriate policy response.
+        let step = negotiation.handle_event(TelnetEvent::Negotiation {
+            command: TelnetCommand::Will,
+            option: unknown,
+        });
         assert_eq!(step.output, option_command(TelnetCommand::Dont, unknown));
+
+        let step = negotiation.handle_event(TelnetEvent::Negotiation {
+            command: TelnetCommand::Do,
+            option: unknown,
+        });
+        assert_eq!(step.output, option_command(TelnetCommand::Wont, unknown));
     }
 
     #[test]
@@ -911,8 +1022,22 @@ mod tests {
             b'0',
         ]));
 
-        assert!(step.extend_deadline);
+        assert!(step.made_progress);
         assert_eq!(negotiation.info.term.as_deref(), Some("vt100"));
+        assert!(!negotiation.is_complete());
+
+        let step = negotiation.handle_event(TelnetEvent::Subnegotiation(vec![
+            option(TelnetOption::TTYPE),
+            0,
+            b'x',
+            b't',
+            b'e',
+            b'r',
+            b'm',
+        ]));
+
+        assert!(!step.made_progress);
+        assert_eq!(negotiation.info.term.as_deref(), Some("xterm"));
         assert!(!negotiation.is_complete());
 
         let step = negotiation.handle_event(TelnetEvent::Subnegotiation(vec![
@@ -923,7 +1048,7 @@ mod tests {
             24,
         ]));
 
-        assert!(step.extend_deadline);
+        assert!(step.made_progress);
         assert_eq!(negotiation.info.size, Some(TerminalSize::new(80, 24)));
         assert!(negotiation.is_complete());
     }
@@ -990,18 +1115,11 @@ mod tests {
         ));
     }
 
-    fn naws(width_hi: u8, width_lo: u8, height_hi: u8, height_lo: u8) -> Vec<u8> {
-        vec![
-            IAC,
-            command(TelnetCommand::Sb),
-            option(TelnetOption::NAWS),
-            width_hi,
-            width_lo,
-            height_hi,
-            height_lo,
-            IAC,
-            command(TelnetCommand::Se),
-        ]
+    fn naws(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![IAC, command(TelnetCommand::Sb)];
+        bytes.extend_from_slice(&naws_payload(width, height));
+        bytes.extend_from_slice(&[IAC, command(TelnetCommand::Se)]);
+        bytes
     }
 
     #[test]
@@ -1009,15 +1127,26 @@ mod tests {
         let mut input = SessionInput::new();
 
         assert_eq!(input.feed(b"random keystrokes"), None);
-        assert_eq!(
-            input.feed(&naws(0, 80, 0, 24)),
-            Some(TerminalSize::new(80, 24))
-        );
+        assert_eq!(input.feed(&naws(80, 24)), Some(TerminalSize::new(80, 24)));
 
         // The last update in a chunk wins.
-        let mut chunk = naws(0, 100, 0, 40);
-        chunk.extend(naws(0, 50, 0, 20));
+        let mut chunk = naws(100, 40);
+        chunk.extend(naws(50, 20));
         assert_eq!(input.feed(&chunk), Some(TerminalSize::new(50, 20)));
+    }
+
+    #[test]
+    fn session_input_applies_remote_viewport_limits() {
+        let mut input = SessionInput::new();
+
+        assert_eq!(
+            input.feed(&naws(MAX_NAWS_WIDTH, 128)),
+            Some(TerminalSize::new(MAX_NAWS_WIDTH, 128))
+        );
+        assert_eq!(input.feed(&naws(MAX_NAWS_WIDTH + 1, 1)), None);
+        assert_eq!(input.feed(&naws(1, MAX_NAWS_HEIGHT + 1)), None);
+        assert_eq!(input.feed(&naws(400, 200)), None);
+        assert_eq!(input.feed(&naws(10_000, 10_000)), None);
     }
 
     #[test]
@@ -1025,14 +1154,14 @@ mod tests {
         let mut input = SessionInput::new();
 
         // A NAWS sequence split across reads parses once complete.
-        let bytes = naws(0, 120, 0, 40);
+        let bytes = naws(120, 40);
         let (head, tail) = bytes.split_at(4);
         assert_eq!(input.feed(head), None);
         assert_eq!(input.feed(tail), Some(TerminalSize::new(120, 40)));
 
         // Zero and out-of-bounds dimensions are rejected at the boundary.
-        assert_eq!(input.feed(&naws(0, 0, 0, 24)), None);
-        assert_eq!(input.feed(&naws(0xff, 0xff, 0, 24)), None);
+        assert_eq!(input.feed(&naws(0, 24)), None);
+        assert_eq!(input.feed(&naws(u16::MAX, 24)), None);
 
         // Non-NAWS subnegotiations are consumed but ignored.
         assert_eq!(

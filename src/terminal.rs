@@ -74,7 +74,9 @@ impl Default for TerminalSize {
 }
 
 pub(crate) fn terminal_size() -> TerminalSize {
-    sys::stdin_terminal_size()
+    // Rendering goes to stdout, so query that terminal even when stdin is
+    // redirected from a file or pipe.
+    sys::stdout_terminal_size()
         .and_then(|(width, height)| TerminalSize::try_new(width, height))
         .unwrap_or_default()
 }

@@ -57,11 +57,11 @@ CLI arguments become `cli::Config`. `main.rs` combines `Config`, terminal metada
 4. Writes the buffer to stdout and flushes.
 5. Advances `render::render_loop::RenderLoop` state or returns `RunOutcome`.
 
-Frame data remains private to `animation.rs`. Rendering obtains symbols through `frame_symbol(frame, row, col)`, which returns `FrameSymbol`. Palette lookup remains an O(1) array index via `FrameSymbol::as_byte()`.
+Frame data remains private to `animation.rs`. Rendering obtains an in-frame row through `frame_row(frame, row)` and converts its bytes to `FrameSymbol`; out-of-frame cells use the background symbol. Palette lookup remains an O(1) array index via `FrameSymbol::as_byte()`.
 
 Block-mode rows end with `\x1b[K` (erase-to-line-end). Cells are two columns wide, so an odd terminal width leaves a one-column gap on the right that the counter's `\x1b[J` would otherwise fill only on the last row, producing a one-cell protrusion at the bottom-right corner. This per-row fill is a **fork-specific divergence** from the historical C renderer; it is visually a no-op at even widths and is excluded from ASCII modes, which have no background to fill.
 
-Terminal dimensions enter the core as `terminal::TerminalSize`, which stores non-zero `u16` values capped at 10000 columns/rows and exposes signed accessors for crop arithmetic. Syscall and telnet inputs that report zero, invalid, or extreme dimensions are rejected at the adapter boundary and fall back to defaults when appropriate, so untrusted NAWS/ioctl metadata cannot force pathological render loops.
+Terminal dimensions enter the core as `terminal::TerminalSize`, which stores non-zero `u16` values capped at 10000 columns/rows and exposes signed accessors for crop arithmetic. Local dimensions are queried from stdout, the actual render destination. Untrusted telnet NAWS reports have a stricter boundary of 512 columns, 256 rows, and a 65,536-cell viewport area; larger updates are ignored before they can expand per-frame work or the reusable output buffer.
 
 `terminal::detect_terminal_type` is a faithful port of the historical `TERM`-matching chain, with one deliberate **fork-specific divergence**: any `TERM` containing `256color` that the historical chain would otherwise leave unclassified (notably `screen-256color` and `tmux-256color`) maps to the 256-color palette instead of the upstream 16-color fallback. The check is placed last, so every explicit historical mapping — including `rxvt-256color` vs. `rxvt` — is unchanged.
 
@@ -71,9 +71,9 @@ The geometric crop options (`--min-rows`, `--max-rows`, `--min-cols`, `--max-col
 
 ## Runtime And Signals
 
-Normal execution restores the terminal through `TerminalSession` drop. Signal paths cannot rely on normal unwinding, so they use raw async-signal-compatible output and `sys::exit`. `SIGHUP`, `SIGINT`, `SIGPIPE`, and `SIGTERM` all route to the same restore-and-exit handler, so `kill`, a closed terminal, or Ctrl-C leave the terminal in a clean state.
+Normal execution and unwinding panics restore the terminal through `TerminalSession` drop. Signal paths cannot rely on unwinding, so they use raw async-signal-compatible output. `SIGHUP`, `SIGINT`, `SIGPIPE`, and `SIGTERM` all restore first; hangup, interrupt, and terminate are then re-raised with their default action so callers observe the conventional signal status, while broken pipe exits successfully.
 
-In clear-screen mode the animation runs on the **alternate screen buffer** (`\x1b[?1049h` at startup, `\x1b[?1049l` on restore), so the terminal's prior contents and scrollback are restored on exit instead of being cleared. The `--no-clear` path is unchanged (save/restore cursor only), which is why the golden smokes — all run with `--no-clear` — are unaffected.
+In clear-screen mode the animation runs on the **alternate screen buffer** (`\x1b[?1049h` at startup, `\x1b[?1049l` on restore), so the terminal's prior contents and scrollback are restored on exit instead of being cleared. The byte-exact goldens use `--no-clear`; a separate smoke path verifies alternate-screen entry and restore markers.
 
 The resize signal path only sets an atomic flag. The render loop consumes that flag, recalculates crop bounds in normal code, and (in clear-screen mode) clears the screen for that one frame so a now-narrower or shorter animation cannot leave stale cells from the previous terminal size along the right edge or below the cat.
 
@@ -85,7 +85,7 @@ Telnet support is intentionally synchronous:
 - `TelnetNegotiation` handles typed command / option state transitions and output bytes.
 - `ByteSource` lets tests drive negotiation with scripted input.
 - `TimeoutReader` is the production stdin/poll source.
-- `SessionInput` drains client bytes between frames after negotiation: mid-session NAWS updates reflow the animation (with the same one-shot screen clear as a local resize), and EOF or a failed read ends the session cleanly. Reads are capped per frame so a flooding client cannot starve rendering. This is a **fork-specific divergence** — the historical C implementation never reads the connection after negotiation, so client resizes were ignored and client bytes accumulated unread.
+- `SessionInput` drains client bytes between frames after negotiation: bounded mid-session NAWS updates reflow the animation (with the same one-shot screen clear as a local resize), EOF ends the session cleanly, and genuine poll/read failures propagate as I/O errors. Reads are capped per frame so a flooding client cannot starve rendering. This is a **fork-specific divergence** — the historical C implementation never reads the connection after negotiation, so client resizes were ignored and client bytes accumulated unread.
 
 Do not introduce async unless the deployment model changes. The current tool speaks telnet over stdin/stdout for socket activation, inetd, or similar supervisors.
 
@@ -96,8 +96,8 @@ Use `io::Result` where the domain is already I/O-bound. Add an app-level error e
 Current process policy:
 
 - CLI errors print a stable user-facing message and exit failure.
-- Broken pipe is treated as successful termination (a downstream reader closing the pipe, e.g. `| head`, is normal).
-- Other runtime I/O errors print after terminal restore and exit failure, so callers and scripts can detect a genuine failure.
+- Broken pipe is treated as successful termination (a downstream reader closing the pipe, e.g. `| head`, is normal). Connection-reset-style errors are also clean termination in telnet mode.
+- Other runtime I/O errors print after terminal restore and exit failure, so callers, scripts, and the included systemd unit can detect a genuine failure.
 
 ## Performance Policy
 

@@ -14,7 +14,7 @@ use cli::{CliAction, parse_args, print_usage, print_version};
 use render::{Palette, RenderState, RunOutcome, run};
 use runtime::TerminalSession;
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 use telnet::negotiate_telnet;
@@ -25,7 +25,10 @@ fn main() -> ExitCode {
     let mut config = match parse_args(&args) {
         Ok(CliAction::Run(config)) => config,
         Ok(CliAction::Help { program }) => {
-            print_usage(&program);
+            print_usage(
+                &program,
+                io::stdout().is_terminal() && !no_color_requested(),
+            );
             return ExitCode::SUCCESS;
         }
         Ok(CliAction::Version) => {
@@ -42,23 +45,35 @@ fn main() -> ExitCode {
 
     if config.benchmark {
         config.delay = Duration::ZERO;
+        let warning = if io::stderr().is_terminal() && !no_color_requested() {
+            "\x1b[1;33mWARNING:\x1b[0m"
+        } else {
+            "WARNING:"
+        };
         let _ = writeln!(
             io::stderr(),
-            "\x1b[1;33mWARNING:\x1b[0m Benchmark mode enabled. Delay set to 0ms; use --frames for a completion report."
+            "{warning} Benchmark mode enabled. Delay set to 0ms; use --frames for a completion report."
         );
     }
 
     if config.telnet && !config.skip_intro {
         config.show_intro = true;
     }
-
-    let mut terminal_session = TerminalSession::new(config.clear_screen);
+    let telnet_mode = config.telnet;
 
     let (term, mut terminal_size) = if config.telnet {
         let mut stdout = io::stdout().lock();
         let info = match negotiate_telnet(&mut stdout) {
             Ok(info) => info,
-            Err(_) => return ExitCode::SUCCESS,
+            Err(error) => {
+                let clean_disconnect = is_clean_disconnect(&error, true);
+                drop(stdout);
+                if clean_disconnect {
+                    return ExitCode::SUCCESS;
+                }
+                let _ = writeln!(io::stderr(), "nyancat: {error}");
+                return ExitCode::FAILURE;
+            }
         };
         (info.term, info.size.unwrap_or_default())
     } else {
@@ -80,6 +95,16 @@ fn main() -> ExitCode {
 
     let palette = Palette::new(terminal_type);
     let state = RenderState::new(&config, terminal_size);
+    let mut terminal_session = match TerminalSession::new(config.clear_screen) {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr(),
+                "nyancat: could not install signal handlers: {error}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
     let mut benchmark_report = None;
     let mut run_error = None;
@@ -94,7 +119,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            if error.kind() == io::ErrorKind::BrokenPipe {
+            if is_clean_disconnect(&error, telnet_mode) {
                 ExitCode::SUCCESS
             } else {
                 run_error = Some(error);
@@ -117,4 +142,45 @@ fn main() -> ExitCode {
 
 fn no_color_requested() -> bool {
     env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+}
+
+fn is_clean_disconnect(error: &io::Error, telnet_mode: bool) -> bool {
+    error.kind() == io::ErrorKind::BrokenPipe
+        || telnet_mode
+            && matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::UnexpectedEof
+            )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broken_pipe_is_always_a_clean_disconnect() {
+        let error = io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe");
+
+        assert!(is_clean_disconnect(&error, false));
+        assert!(is_clean_disconnect(&error, true));
+    }
+
+    #[test]
+    fn reset_connection_is_clean_only_in_telnet_mode() {
+        let error = io::Error::new(io::ErrorKind::ConnectionReset, "reset connection");
+
+        assert!(!is_clean_disconnect(&error, false));
+        assert!(is_clean_disconnect(&error, true));
+    }
+
+    #[test]
+    fn unrelated_errors_are_never_clean_disconnects() {
+        let error = io::Error::other("unrelated output failure");
+
+        assert!(!is_clean_disconnect(&error, false));
+        assert!(!is_clean_disconnect(&error, true));
+    }
 }

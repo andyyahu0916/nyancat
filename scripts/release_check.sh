@@ -5,25 +5,39 @@ BIN=${NYANCAT_BIN:-target/release/nyancat}
 TMP=${TMPDIR:-/tmp}
 GOLDEN_DIR=${GOLDEN_DIR:-tests/golden}
 
-normal_out="$TMP/nyancat-rust-smoke.out"
-telnet_out="$TMP/nyancat-rust-telnet-smoke.out"
-truecolor_out="$TMP/nyancat-rust-truecolor-smoke.out"
-crop_out="$TMP/nyancat-rust-crop-smoke.out"
-benchmark_out="$TMP/nyancat-rust-benchmark-smoke.out"
-benchmark_err="$TMP/nyancat-rust-benchmark-smoke.err"
-cli_err="$TMP/nyancat-rust-cli-error.err"
-frames_err="$TMP/nyancat-rust-frames-error.err"
-flag_value_err="$TMP/nyancat-rust-flag-value-error.err"
-crop_err="$TMP/nyancat-rust-crop-error.err"
-write_err="$TMP/nyancat-rust-write-error.err"
-help_out="$TMP/nyancat-rust-help.out"
-package_list="$TMP/nyancat-rust-package-list.out"
-archive_log="$TMP/nyancat-rust-release-archive.log"
-archive_list="$TMP/nyancat-rust-release-archive-list.out"
-archive_dir=$(mktemp -d "$TMP/nyancat-rust-release-archive.XXXXXX")
+work_dir=$(mktemp -d "$TMP/nyancat-rust-release-check.XXXXXX")
+normal_out="$work_dir/normal.out"
+clear_out="$work_dir/clear.out"
+signal_out="$work_dir/signal.out"
+telnet_out="$work_dir/telnet.out"
+truecolor_out="$work_dir/truecolor.out"
+crop_out="$work_dir/crop.out"
+benchmark_out="$work_dir/benchmark.out"
+benchmark_err="$work_dir/benchmark.err"
+cli_err="$work_dir/cli-error.err"
+frames_err="$work_dir/frames-error.err"
+flag_value_err="$work_dir/flag-value-error.err"
+crop_err="$work_dir/crop-error.err"
+write_err="$work_dir/write-error.err"
+telnet_write_err="$work_dir/telnet-write-error.err"
+help_out="$work_dir/help.out"
+package_list="$work_dir/package-list.out"
+archive_log="$work_dir/release-archive.log"
+archive_list="$work_dir/release-archive-list.out"
+archive_dir="$work_dir/archive"
 
 cleanup() {
-    rm -rf "$archive_dir"
+    if [ -n "${signal_pid:-}" ]; then
+        kill "$signal_pid" 2> /dev/null || true
+    fi
+    if [ -n "${pipe_signal_pid:-}" ]; then
+        kill -CONT "$pipe_signal_pid" 2> /dev/null || true
+        kill -KILL "$pipe_signal_pid" 2> /dev/null || true
+    fi
+    if [ -n "${pipe_reader_pid:-}" ]; then
+        kill "$pipe_reader_pid" 2> /dev/null || true
+    fi
+    rm -rf "$work_dir"
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -136,6 +150,7 @@ check_absent "$archive_list" ".staging" "archive staging directory"
 
 echo "== smoke tests =="
 env NO_COLOR= TERM=xterm-256color "$BIN" --frames 1 --no-title --no-clear --no-counter > "$normal_out"
+env NO_COLOR= TERM=xterm-256color "$BIN" --frames 1 --no-title --no-counter > "$clear_out"
 "$BIN" --telnet --skip-intro --frames 1 --no-title --no-clear --no-counter > "$telnet_out"
 env NO_COLOR= TERM=xterm-256color "$BIN" --truecolor --frames 1 --no-title --no-clear --no-counter > "$truecolor_out"
 env NO_COLOR= TERM=xterm-256color "$BIN" --frames 1 --width 40 --height 24 --no-title --no-clear --no-counter > "$crop_out"
@@ -156,12 +171,61 @@ check_contains "$normal_out" "${esc}[48;5;196m" "xterm rainbow red"
 check_absent "$normal_out" "${esc}[48;2;" "truecolor escape sequence"
 check_absent "$normal_out" "You have nyaned for" "counter text"
 
+check_contains "$clear_out" "${esc}[?1049h${esc}[H${esc}[2J${esc}[?25l" "alternate-screen entry"
+check_contains "$clear_out" "${esc}[?25h${esc}[0m${esc}[?1049l" "alternate-screen restore"
+
+env NO_COLOR= TERM=xterm-256color "$BIN" --no-title --no-counter > "$signal_out" &
+signal_pid=$!
+sleep 1
+kill -TERM "$signal_pid"
+set +e
+wait "$signal_pid"
+signal_status=$?
+set -e
+signal_pid=
+if [ "$signal_status" -ne 143 ]; then
+    echo "SIGTERM smoke exited $signal_status instead of 143" >&2
+    exit 1
+fi
+check_contains "$signal_out" "${esc}[?25h${esc}[0m${esc}[?1049l" "signal-path terminal restore"
+
+# Closing stdout while another exit signal is pending must not let a nested
+# SIGPIPE replace the original signal's status. Stop the writer before closing
+# the FIFO reader so the SIGTERM is deterministically delivered first.
+pipe_signal_dir="$work_dir/pipe-signal"
+mkdir "$pipe_signal_dir"
+mkfifo "$pipe_signal_dir/stdout"
+cat "$pipe_signal_dir/stdout" > /dev/null &
+pipe_reader_pid=$!
+env NO_COLOR= TERM=xterm-256color "$BIN" --no-title --no-counter > "$pipe_signal_dir/stdout" &
+pipe_signal_pid=$!
+sleep 1
+kill -STOP "$pipe_signal_pid"
+kill -TERM "$pipe_reader_pid"
+set +e
+wait "$pipe_reader_pid"
+set -e
+pipe_reader_pid=
+kill -TERM "$pipe_signal_pid"
+kill -CONT "$pipe_signal_pid"
+set +e
+wait "$pipe_signal_pid"
+pipe_signal_status=$?
+set -e
+pipe_signal_pid=
+if [ "$pipe_signal_status" -ne 143 ]; then
+    echo "closed-pipe SIGTERM smoke exited $pipe_signal_status instead of 143" >&2
+    exit 1
+fi
+
 check_contains "$truecolor_out" "${esc}[s${esc}[u${esc}[48;2;0;49;105m" "truecolor frame prefix"
 check_contains "$truecolor_out" "${esc}[48;2;255;25;0m" "truecolor rainbow red"
 check_absent "$truecolor_out" "${esc}[48;5;" "256-color escape sequence"
 
 check_contains "$crop_out" "${esc}[s${esc}[u${esc}[48;5;17m" "cropped frame prefix"
 check_absent "$benchmark_out" "You have nyaned for" "benchmark counter text"
+check_absent "$benchmark_err" "$esc" "terminal styling on redirected benchmark stderr"
+check_absent "$help_out" "$esc" "terminal styling on redirected help output"
 
 check_contains "$telnet_out" "$telnet_iac_wont_echo" "telnet negotiation prefix"
 check_contains "$telnet_out" "${esc}[s${esc}[u${esc}[104m" "telnet ANSI frame prefix"
@@ -169,7 +233,7 @@ check_char_count "$normal_out" '\000' 0 "normal NUL bytes"
 check_char_count "$telnet_out" '\000' 23 "telnet NUL newline bytes"
 check_char_count "$telnet_out" '\015' 23 "telnet CR newline bytes"
 
-nocolor_out="$TMP/nyancat-rust-nocolor-smoke.out"
+nocolor_out="$work_dir/nocolor.out"
 env NO_COLOR=1 TERM=xterm-256color "$BIN" --frames 1 --no-title --no-clear --no-counter > "$nocolor_out"
 check_absent "$nocolor_out" "${esc}[48" "color background under NO_COLOR"
 check_contains "$nocolor_out" "::" "NO_COLOR ascii output"
@@ -228,6 +292,12 @@ if [ -c /dev/full ]; then
         exit 1
     fi
     grep -F "nyancat: " "$write_err" > /dev/null
+
+    if "$BIN" --telnet < /dev/null > /dev/full 2> "$telnet_write_err"; then
+        echo "expected telnet negotiation write failure to exit non-zero" >&2
+        exit 1
+    fi
+    grep -F "nyancat: " "$telnet_write_err" > /dev/null
 fi
 
 echo "release check passed"

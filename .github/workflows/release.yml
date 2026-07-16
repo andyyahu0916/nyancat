@@ -11,22 +11,49 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Match tag to package version
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+          test -n "$version"
+          expected_tag="v$version"
+          if [ "$RELEASE_TAG" != "$expected_tag" ]; then
+            echo "release tag $RELEASE_TAG does not match Cargo.toml version $expected_tag" >&2
+            exit 1
+          fi
+
   linux:
     name: Linux release artifact
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
-      - name: Checkout
+      - name: Checkout tag
         uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ github.event.inputs.tag || github.ref_name }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - name: Install stable Rust
         run: |
@@ -43,34 +70,33 @@ jobs:
           test -f "$archive"
           echo "path=$archive" >> "$GITHUB_OUTPUT"
 
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release exists; updating assets"
-          else
-            gh release create "$TAG" --generate-notes --verify-tag
-          fi
-          gh release upload "$TAG" "${{ steps.archive.outputs.path }}" --clobber
+      - name: Stage Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: ${{ steps.archive.outputs.path }}
+          if-no-files-found: error
+          retention-days: 1
 
   macos:
     name: macOS release artifact
-    needs: linux
+    needs: validate
     runs-on: macos-latest
     timeout-minutes: 20
 
     steps:
-      - name: Checkout
+      - name: Checkout tag
         uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ github.event.inputs.tag || github.ref_name }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - name: Install stable Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+
+      - name: Test tagged source
+        run: cargo test --locked
 
       - name: Build release archive
         id: archive
@@ -79,8 +105,55 @@ jobs:
           test -f "$archive"
           echo "path=$archive" >> "$GITHUB_OUTPUT"
 
-      - name: Upload macOS asset to release
+      - name: Stage macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: ${{ steps.archive.outputs.path }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum -- *.tar.gz > SHA256SUMS
+
+      - name: Publish immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: gh release upload "$TAG" "${{ steps.archive.outputs.path }}" --clobber
+          GH_REPO: ${{ github.repository }}
+        run: |
+          assets=(release-assets/*.tar.gz)
+          if [ "${#assets[@]}" -ne 2 ]; then
+            echo "expected two release archives, found ${#assets[@]}" >&2
+            exit 1
+          fi
+          release_files=("${assets[@]}" release-assets/SHA256SUMS)
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)
+            if [ "$is_draft" != true ]; then
+              echo "release $RELEASE_TAG is already published; refusing to replace live assets" >&2
+              exit 1
+            fi
+            gh release delete "$RELEASE_TAG" --yes
+          fi
+
+          gh release create "$RELEASE_TAG" --draft --generate-notes --verify-tag
+          gh release upload "$RELEASE_TAG" "${release_files[@]}"
+          gh release edit "$RELEASE_TAG" --draft=false

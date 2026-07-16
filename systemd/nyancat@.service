@@ -3,7 +3,7 @@ Description=nyancat
 Documentation=man:nyancat(1)
 
 [Service]
-ExecStart=-/usr/bin/nyancat -t
+ExecStart=/usr/bin/nyancat -t
 StandardInput=socket
 StandardOutput=socket
 
@@ -34,6 +34,8 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+MemoryMax=64M
+TasksMax=1
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native

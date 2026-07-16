@@ -3,9 +3,9 @@
 > A fast, colorful Nyancat animation for your terminal, written in Rust.
 
 [![License](https://img.shields.io/badge/license-NCSA-blue.svg)](LICENSE)
-[![CI](https://github.com/andyyahu/nyancat/actions/workflows/ci.yml/badge.svg)](https://github.com/andyyahu/nyancat/actions/workflows/ci.yml)
+[![CI](https://github.com/andyyahu/nyancat-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/andyyahu/nyancat-rust/actions/workflows/ci.yml)
 
-![Nyancat](http://nyancat.dakko.us/nyancat.png)
+![Nyancat](https://nyancat.dakko.us/nyancat.png)
 
 ## ✨ Features
 
@@ -14,8 +14,64 @@
 - **TrueColor support** - Optional 24-bit high-definition rendering mode
 - **Benchmark mode** - Zero-delay rendering for performance testing
 - **Telnet mode** - Share Nyancat over the network through socket activation or inetd; the animation reflows live when the client window resizes
-- **Cross-platform** - Supports Linux, macOS, BSD, and other Unix-like systems
+- **Unix-focused** - CI-verified on Linux and macOS, with BSD-family FFI support
 - **Minimal dependencies** - No external crates required
+
+## 🚀 Quick Start
+
+### Build and Run
+
+```bash
+# Build the release version
+cargo build --release
+
+# Run the animation
+./target/release/nyancat
+```
+
+Or run directly with Cargo:
+
+```bash
+cargo run --release
+```
+
+### Serve over telnet
+
+The included systemd socket listens on TCP port 23 on all interfaces by default, and telnet traffic is unencrypted. Before enabling it, bind `ListenStream` to a trusted interface (such as `127.0.0.1:23`) or restrict TCP/23 with your firewall.
+
+```bash
+# The -t flag speaks telnet over stdin/stdout; it does not open a listening port.
+# Use the included systemd socket files, xinetd, or openbsd-inetd for network access.
+sudo cp target/release/nyancat /usr/bin/nyancat
+sudo cp systemd/nyancat.socket systemd/nyancat@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nyancat.socket
+```
+
+Then connect with:
+
+```bash
+telnet localhost 23
+```
+
+Example systemd service files are included in the `systemd/` directory.
+The supplied service expects the executable at `/usr/bin/nyancat`; adjust
+`ExecStart` if you install it elsewhere.
+
+## 📦 Installation
+
+### From a release artifact
+
+Download the archive matching your platform and architecture from [GitHub Releases](https://github.com/andyyahu/nyancat-rust/releases). Archives are named `nyancat-vX.Y.Z-<rust-host>.tar.gz`; the executable is under `bin/nyancat` and the man page under `share/man/man1/nyancat.1`. Verify the download against the release's `SHA256SUMS` file before installing it.
+
+### From source
+
+```bash
+# Install to $CARGO_HOME/bin (usually ~/.cargo/bin)
+cargo install --path . --locked
+```
+
+For a local build without installing, run `cargo build --release --locked`; the binary is written to `target/release/nyancat`.
 
 ## ⚡ Performance
 
@@ -44,53 +100,6 @@ Reported values depend on hardware, terminal mode, build profile, and output des
 
 See the benchmark section in [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md#benchmarking) for recent local snapshots.
 
-## 🚀 Quick Start
-
-### Build and Run
-
-```bash
-# Build the release version
-cargo build --release
-
-# Run the animation
-./target/release/nyancat
-```
-
-Or run directly with Cargo:
-
-```bash
-cargo run --release
-```
-
-### Serve over telnet
-
-```bash
-# The -t flag speaks telnet over stdin/stdout; it does not open a listening port.
-# Use the included systemd socket files, xinetd, or openbsd-inetd for network access.
-sudo cp target/release/nyancat /usr/bin/nyancat
-sudo cp systemd/nyancat.socket systemd/nyancat@.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now nyancat.socket
-```
-
-Then connect with:
-
-```bash
-telnet localhost 23
-```
-
-Example systemd service files are included in the `systemd/` directory.
-
-## 📦 Installation
-
-### From source
-
-```bash
-cargo build --release
-# Optionally copy to your bin folder
-cp target/release/nyancat /usr/local/bin/
-```
-
 ## 💻 Usage
 
 ```bash
@@ -113,7 +122,7 @@ nyancat -T
 | :--- | :--- | :--- |
 | `-i` | `--intro` | Show introduction at startup |
 | `-I` | `--skip-intro` | Skip the introduction in telnet mode |
-| `-t` | `--telnet` | Enable Telnet protocol mode |
+| `-t` | `--telnet` | Speak Telnet over stdin/stdout; does not open a port |
 | `-T` | `--truecolor` | Enable 24-bit TrueColor rendering |
 | `-n` | `--no-counter` | Do not display the timer |
 | `-s` | `--no-title` | Do not set titlebar text |
@@ -132,7 +141,7 @@ nyancat -T
 
 ### Environment
 
-- `NO_COLOR` — when set to a non-empty value, nyancat renders in monochrome ASCII (honoring [no-color.org](https://no-color.org)). It does not apply to telnet sessions, where color is the connecting client's concern.
+- `NO_COLOR` — when set to a non-empty value, nyancat renders in monochrome ASCII and omits styling from help and diagnostics (honoring [no-color.org](https://no-color.org)). Render-mode selection does not apply to telnet sessions, where color is the connecting client's concern.
 
 ## 🔧 Development
 
@@ -178,6 +187,7 @@ scripts/release_archive.sh
 
 - **Original Nyancat animation**: [prguitarman](http://www.prguitarman.com/index.php?id=348)
 - **Original implementation**: [Kevin Lange (klange)](https://github.com/klange/nyancat)
+- **Original project website**: [nyancat.dakko.us](https://nyancat.dakko.us/)
 - **Rust rewrite**: This project
 
 ## 📜 License

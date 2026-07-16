@@ -11,6 +11,26 @@ const POLLIN: i16 = 0x001;
 const POLLERR: i16 = 0x008;
 const POLLHUP: i16 = 0x010;
 const POLLNVAL: i16 = 0x020;
+const SIG_DFL: usize = 0;
+const SIG_IGN: usize = 1;
+const SIG_ERR: usize = usize::MAX;
+
+// Linux defines nfds_t as unsigned long; Android and the supported BSD-family
+// targets define it as unsigned int. Keep the raw declaration ABI-accurate
+// without adding a runtime dependency solely for this alias.
+#[cfg(target_os = "linux")]
+type PollNfds = usize;
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+type PollNfds = u32;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const TIOCGWINSZ: usize = 0x5413;
@@ -51,7 +71,7 @@ pub enum Signal {
 }
 
 impl Signal {
-    const fn number(self) -> i32 {
+    pub const fn number(self) -> i32 {
         match self {
             Self::Hangup => SIGHUP,
             Self::Interrupt => SIGINT,
@@ -104,20 +124,24 @@ struct PollFd {
 
 unsafe extern "C" {
     fn ioctl(fd: i32, request: usize, ...) -> i32;
-    fn poll(fds: *mut PollFd, nfds: usize, timeout: i32) -> i32;
+    fn poll(fds: *mut PollFd, nfds: PollNfds, timeout: i32) -> i32;
     fn signal(signum: i32, handler: usize) -> usize;
+    fn raise(signum: i32) -> i32;
     fn write(fd: i32, buf: *const c_void, count: usize) -> isize;
     fn read(fd: i32, buf: *mut c_void, count: usize) -> isize;
     fn _exit(status: i32) -> !;
 }
 
-pub fn install_signal_handler(signal_kind: Signal, handler: SignalHandler) {
-    unsafe {
-        signal(signal_kind.number(), handler as *const () as usize);
+pub fn install_signal_handler(signal_kind: Signal, handler: SignalHandler) -> io::Result<()> {
+    let previous = unsafe { signal(signal_kind.number(), handler as *const () as usize) };
+    if previous == SIG_ERR {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
-pub fn stdin_terminal_size() -> Option<(i32, i32)> {
+pub fn stdout_terminal_size() -> Option<(i32, i32)> {
     let mut winsize = Winsize {
         ws_row: 0,
         ws_col: 0,
@@ -125,7 +149,7 @@ pub fn stdin_terminal_size() -> Option<(i32, i32)> {
         ws_ypixel: 0,
     };
 
-    let rc = unsafe { ioctl(Fd::STDIN.as_raw(), TIOCGWINSZ, &mut winsize) };
+    let rc = unsafe { ioctl(Fd::STDOUT.as_raw(), TIOCGWINSZ, &mut winsize) };
     if rc == 0 && winsize.ws_col > 0 && winsize.ws_row > 0 {
         Some((winsize.ws_col as i32, winsize.ws_row as i32))
     } else {
@@ -182,9 +206,32 @@ pub fn read_stdin(buffer: &mut [u8]) -> io::Result<StdinRead> {
 }
 
 pub fn write_stdout_raw(data: &[u8]) {
-    unsafe {
-        let _ = write(Fd::STDOUT.as_raw(), data.as_ptr().cast(), data.len());
+    let mut remaining = data;
+    while !remaining.is_empty() {
+        let written = unsafe {
+            write(
+                Fd::STDOUT.as_raw(),
+                remaining.as_ptr().cast(),
+                remaining.len(),
+            )
+        };
+        if written <= 0 {
+            break;
+        }
+        remaining = &remaining[written as usize..];
     }
+}
+
+pub fn ignore_signal(signal_kind: Signal) -> bool {
+    let previous = unsafe { signal(signal_kind.number(), SIG_IGN) };
+    previous != SIG_ERR
+}
+
+/// Restores the default action and queues the signal again. The caller must
+/// return from its handler so the currently blocked signal can be delivered.
+pub fn reraise_with_default(signal_number: i32) -> bool {
+    let previous = unsafe { signal(signal_number, SIG_DFL) };
+    previous != SIG_ERR && unsafe { raise(signal_number) } == 0
 }
 
 pub fn exit(status: i32) -> ! {

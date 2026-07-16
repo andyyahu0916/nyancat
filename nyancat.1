@@ -1,4 +1,4 @@
-.TH NYANCAT 1 "May, 2026"
+.TH NYANCAT 1 "July, 2026"
 .SH NAME
 nyancat \- terminal-based Pop Tart Cat animation (Rust Edition)
 .SH SYNOPSIS
@@ -19,7 +19,8 @@ Show introduction / about information on startup.
 Skip the introduction in telnet mode.
 .TP
 .B \-t, \-\-telnet
-Enable telnet mode.
+Enable telnet protocol negotiation on standard input and standard output.
+This option does not open a listening socket.
 .TP
 .B \-T, \-\-truecolor
 Enable 24-bit TrueColor mode (high-definition rendering).
@@ -85,11 +86,18 @@ Show version information and exit.
 .SH ENVIRONMENT
 .TP
 .B NO_COLOR
-When set to a non-empty value, render in monochrome ASCII instead of color (see https://no\-color.org). Ignored in telnet mode, where color is the connecting client's concern.
+When set to a non-empty value, render in monochrome ASCII and omit styling from help and diagnostics (see https://no\-color.org). Render-mode selection is ignored in telnet mode, where color is the connecting client's concern.
+.SH TELNET DEPLOYMENT
+.PP
+Network access requires a socket activation or inetd-style service.
+The included systemd socket unit listens on TCP port 23 on all interfaces by default,
+and telnet traffic is unencrypted. Before enabling it, bind
+.B ListenStream
+to a trusted interface, such as 127.0.0.1:23, or restrict TCP port 23 with a firewall.
 .SH HOMEPAGE
 .PP
 .B Homepage:
-http://nyancat.dakko.us/
+https://github.com/andyyahu/nyancat-rust
 .SH AUTHOR
 Original C nyancat was written by K. Lange <klange@toaruos.org>.
 This Rust port was developed by Andy and the community.

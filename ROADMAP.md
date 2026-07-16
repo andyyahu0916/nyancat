@@ -26,6 +26,7 @@
 - terminal、palette、frame symbol、terminal size 改成語意型別；`TerminalSize` 內部保證 bounded positive dimensions，render hot path 保留 O(1) palette lookup。
 - `RenderState`、`Renderer`、`render/` 子模組分離 frame bytes 生成、palette lookup、timing、buffer reuse、telnet newline 和 benchmark accounting。
 - telnet negotiation 拆成 parser、state machine、subnegotiation parser 和 `ByteSource`；command / option 已型別化，未知 option 仍以 raw byte newtype 保留並可測。
+- 遠端 NAWS 已在 protocol boundary 加入寬、高與 viewport area budget；mid-session poll/read error 不再一律吞成正常斷線。
 - `TerminalSession` 用 RAII restore terminal；Unix FFI 和 signal path 集中在 `sys.rs` / `runtime.rs`，stdin poll/read 回傳 typed outcomes 而不是吞成 bool / `Option`。
 - release gate、output smoke golden checks、benchmark report、benchmark matrix 和 CI/MSRV/macOS jobs 已建立。
 
@@ -114,8 +115,8 @@
 
 這部分會把終端玩具推向正式軟體發行品質。
 
-- `v*` tag 會觸發 `.github/workflows/release.yml`：linux job 先 checkout 對應 tag ref、跑 `scripts/release_check.sh` gate，再用 `scripts/release_archive.sh` 建 archive 並建立 GitHub Release；macOS job checkout 同一 tag ref 並上傳對應 archive。目前產出 Linux 與 macOS host-target artifact，更多 target（其他 arch / BSD）是後續 build matrix 延伸。
-- crates.io 發佈仍是「刻意延遲」的決策，不進自動化：需要先確認 crate 名稱所有權與發佈 token，且發佈是不可逆動作，應由維護者手動執行而非 CI 自動觸發。`Cargo.toml` metadata 已具備 description/repository/homepage/readme/license/keywords/categories，足以支援 GitHub Release 與未來的 crates.io。
+- `v*` tag 會觸發 `.github/workflows/release.yml`：workflow 先驗證 tag 等於 `v${Cargo.toml version}`，Linux 與 macOS 平行建 archive；兩者都成功後才產生 `SHA256SUMS`、重建未完成的 draft 並發布 immutable GitHub Release。已發布版本不允許 workflow 覆寫 live assets。目前產出 Linux 與 macOS host-target artifact，更多 target（其他 arch / BSD）是後續 build matrix 延伸。
+- crates.io 發佈仍是「刻意延遲」的決策，`Cargo.toml` 以 `publish = false` 防止誤發。若未來要發布，需先確認 crate 名稱所有權與 token，再以明確 commit 解除此保護。
 - 將 package manifest 檢查納入 release gate，避免發行檔案清單或 metadata 在最後一刻才出問題。
 - 確認 manpage、systemd service、README 安裝步驟一致。
 - 如果要改 default branch 名稱，先同步本機、GitHub default branch、README 文件。

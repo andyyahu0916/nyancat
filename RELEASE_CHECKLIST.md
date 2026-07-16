@@ -28,9 +28,10 @@ The script covers:
 - `sh -n` syntax checks for release helper scripts
 - `cargo package --list --allow-dirty --locked`, including expected release files and excluding local-only dotfiles
 - `scripts/release_archive.sh` with a temporary dist directory, followed by archive content checks
-- Smoke tests with exact golden comparisons, output marker checks, CLI error checks, and `--help` option coverage
+- Smoke tests with exact golden comparisons, alternate-screen restore markers, CLI/telnet write-error checks, and `--help` option coverage
 
 GitHub Actions also runs the release check on stable Rust, a separate MSRV build/test job for Rust 1.85.0, and macOS test/build/smoke coverage against the committed goldens.
+The release workflow requires a tag matching `v${Cargo.toml version}`, builds Linux and macOS archives before publishing, and attaches a `SHA256SUMS` file. Failed drafts can be rebuilt, but an already published release is immutable and the workflow refuses to replace its live assets.
 
 If you need to run the steps manually, use the commands in the sections below.
 
@@ -82,6 +83,9 @@ The automated smoke checks also verify key output markers:
 - TrueColor output uses 24-bit escape sequences and does not emit 256-color sequences.
 - telnet output starts with negotiation bytes and uses CR NUL LF newline markers.
 - `--no-counter` smoke paths do not print counter text.
+- clear-screen startup enters and restores the alternate screen; SIGTERM smokes verify signal-path restore and status 143 even when stdout closes during cleanup.
+- redirected help and benchmark diagnostics do not contain terminal styling.
+- genuine local and telnet negotiation write failures return non-zero.
 
 ## Benchmarking
 
@@ -138,6 +142,7 @@ For comparable render-throughput measurements, build in release mode and redirec
 - Confirm `cargo package --list --locked` contains the expected user docs, release scripts, golden smoke fixtures, source files, manpage, and systemd files.
 - Confirm the package list excludes local-only files such as `.codex`, `.cargo/config.toml`, and GitHub Actions workflow metadata.
 - Confirm release artifacts are built from a clean checkout or a clean working tree; `scripts/release_check.sh` builds a temporary archive and verifies its contents.
+- Confirm the GitHub Release contains both platform archives and `SHA256SUMS`.
 
 To build a local binary release archive:
 
@@ -168,4 +173,4 @@ After verification, tag with the package version:
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
 ```
 
-Only push tags after the release artifact and documentation have been reviewed.
+The tag must exactly equal `v` followed by the `Cargo.toml` version. Only push tags after the release artifact and documentation have been reviewed.

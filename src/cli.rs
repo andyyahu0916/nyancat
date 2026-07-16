@@ -99,6 +99,17 @@ impl AxisCrop {
     pub(crate) fn is_terminal_dependent(self) -> bool {
         matches!(self, Self::Auto | Self::AutoBounded { .. })
     }
+
+    fn known_range(self) -> Option<AxisRange> {
+        match self {
+            Self::AutoBounded {
+                min: Some(min),
+                max: Some(max),
+            } => Some(AxisRange::new(min, max)),
+            Self::Fixed(range) => Some(range),
+            Self::Auto | Self::AutoBounded { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,6 +149,9 @@ pub(crate) enum CliAction {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum CliError {
+    UnexpectedArgument {
+        argument: String,
+    },
     MissingValue {
         option: String,
     },
@@ -162,11 +176,19 @@ pub(crate) enum CliError {
     UnknownOption {
         option: String,
     },
+    InvalidCropRange {
+        axis: &'static str,
+        min: i32,
+        max: i32,
+    },
 }
 
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnexpectedArgument { argument } => {
+                write!(f, "unexpected argument: {argument}")
+            }
             Self::MissingValue { option } => write!(f, "missing value for {option}"),
             Self::UnexpectedValue { option, value } => {
                 write!(f, "unexpected value for {option}: {value}")
@@ -187,6 +209,10 @@ impl fmt::Display for CliError {
                 "value for {option} out of range: {value} (expected {min}-{max})"
             ),
             Self::UnknownOption { option } => write!(f, "unknown option: {option}"),
+            Self::InvalidCropRange { axis, min, max } => write!(
+                f,
+                "invalid {axis} crop range: minimum {min} must be less than maximum {max}"
+            ),
         }
     }
 }
@@ -301,7 +327,12 @@ const OPTION_SPECS: &[OptionSpec] = &[
         "skip-intro",
         "Skip the introduction in telnet mode.",
     ),
-    OptionSpec::flag(OptionId::Telnet, 't', "telnet", "Telnet mode."),
+    OptionSpec::flag(
+        OptionId::Telnet,
+        't',
+        "telnet",
+        "Speak telnet over stdin/stdout; does not open a port.",
+    ),
     OptionSpec::flag(
         OptionId::TrueColor,
         'T',
@@ -418,6 +449,11 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliAction, CliError> {
     while i < args.len() {
         let arg = &args[i];
         if arg == "--" {
+            if let Some(argument) = args.get(i + 1) {
+                return Err(CliError::UnexpectedArgument {
+                    argument: argument.clone(),
+                });
+            }
             break;
         }
 
@@ -481,12 +517,36 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliAction, CliError> {
                     return Ok(action);
                 }
             }
+        } else {
+            return Err(CliError::UnexpectedArgument {
+                argument: arg.clone(),
+            });
         }
 
         i += 1;
     }
 
+    validate_crop_bounds(config.crop)?;
     Ok(CliAction::Run(config))
+}
+
+fn validate_crop_bounds(crop: CropBounds) -> Result<(), CliError> {
+    validate_axis_crop("row", crop.rows)?;
+    validate_axis_crop("column", crop.cols)
+}
+
+fn validate_axis_crop(axis: &'static str, crop: AxisCrop) -> Result<(), CliError> {
+    if let Some(range) = crop.known_range() {
+        if range.min >= range.max {
+            return Err(CliError::InvalidCropRange {
+                axis,
+                min: range.min,
+                max: range.max,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_flag(
@@ -598,7 +658,12 @@ fn apply_value_option(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn usage_text(program: &str) -> String {
+    usage_text_with_style(program, true)
+}
+
+fn usage_text_with_style(program: &str, styled: bool) -> String {
     let mut usage = format!("Terminal Nyancat\n\nusage: {program} [options]\n\n");
 
     for spec in OPTION_SPECS {
@@ -606,17 +671,21 @@ pub(crate) fn usage_text(program: &str) -> String {
             Some(value_name) => format!("-{}, --{} <{}>", spec.short, spec.long, value_name),
             None => format!("-{}, --{}", spec.short, spec.long),
         };
-        usage.push_str(&format!(
-            "  {option:<25}\x1b[3m{}\x1b[0m\n",
-            spec.description
-        ));
+        if styled {
+            usage.push_str(&format!(
+                "  {option:<25}\x1b[3m{}\x1b[0m\n",
+                spec.description
+            ));
+        } else {
+            usage.push_str(&format!("  {option:<25}{}\n", spec.description));
+        }
     }
 
     usage
 }
 
-pub(crate) fn print_usage(program: &str) {
-    print!("{}", usage_text(program));
+pub(crate) fn print_usage(program: &str, styled: bool) {
+    print!("{}", usage_text_with_style(program, styled));
 }
 
 pub(crate) fn print_version() {
@@ -738,6 +807,14 @@ mod tests {
         for line in usage.lines().filter(|line| line.contains("\x1b[3m")) {
             assert!(line.ends_with("\x1b[0m"));
         }
+    }
+
+    #[test]
+    fn plain_usage_text_omits_terminal_styling() {
+        let usage = usage_text_with_style("nyancat", false);
+
+        assert!(!usage.contains('\x1b'));
+        assert!(usage.contains("-t, --telnet"));
     }
 
     #[test]
@@ -906,6 +983,53 @@ mod tests {
     }
 
     #[test]
+    fn positional_arguments_are_rejected() {
+        for argument in ["scene.txt", "-", ""] {
+            let args = vec!["nyancat".to_string(), argument.to_string()];
+
+            assert_eq!(
+                parse_args(&args),
+                Err(CliError::UnexpectedArgument {
+                    argument: argument.to_string()
+                })
+            );
+        }
+
+        assert_eq!(
+            CliError::UnexpectedArgument {
+                argument: "scene.txt".to_string()
+            }
+            .to_string(),
+            "unexpected argument: scene.txt"
+        );
+    }
+
+    #[test]
+    fn arguments_after_double_dash_are_rejected() {
+        for argument in ["scene.txt", "--help", ""] {
+            let args = vec![
+                "nyancat".to_string(),
+                "--".to_string(),
+                argument.to_string(),
+            ];
+
+            assert_eq!(
+                parse_args(&args),
+                Err(CliError::UnexpectedArgument {
+                    argument: argument.to_string()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_double_dash_is_accepted() {
+        let args = vec!["nyancat".to_string(), "--".to_string()];
+
+        assert_eq!(parse_args(&args), Ok(CliAction::Run(Config::default())));
+    }
+
+    #[test]
     fn flag_options_reject_inline_values() {
         let args = vec!["nyancat".to_string(), "--no-counter=false".to_string()];
 
@@ -951,6 +1075,69 @@ mod tests {
                 option: "--wat".to_string()
             })
         );
+    }
+
+    #[test]
+    fn invalid_final_crop_ranges_are_reported() {
+        for (axis, min_option, max_option, min, max) in [
+            ("row", "--min-rows", "--max-rows", 20, 20),
+            ("row", "--min-rows", "--max-rows", 21, 20),
+            ("column", "--min-cols", "--max-cols", 30, 30),
+            ("column", "--min-cols", "--max-cols", 31, 30),
+        ] {
+            let args = vec![
+                "nyancat".to_string(),
+                format!("{min_option}={min}"),
+                format!("{max_option}={max}"),
+            ];
+
+            assert_eq!(
+                parse_args(&args),
+                Err(CliError::InvalidCropRange { axis, min, max })
+            );
+        }
+
+        assert_eq!(
+            CliError::InvalidCropRange {
+                axis: "row",
+                min: 20,
+                max: 20,
+            }
+            .to_string(),
+            "invalid row crop range: minimum 20 must be less than maximum 20"
+        );
+    }
+
+    #[test]
+    fn crop_validation_uses_the_final_combined_range() {
+        let corrected_bound = vec![
+            "nyancat".to_string(),
+            "--min-rows=30".to_string(),
+            "--max-rows=20".to_string(),
+            "--max-rows=40".to_string(),
+        ];
+        let overwritten_bounds = vec![
+            "nyancat".to_string(),
+            "--min-cols=50".to_string(),
+            "--max-cols=40".to_string(),
+            "--width=20".to_string(),
+        ];
+        let mixed_fixed_and_bounds = vec![
+            "nyancat".to_string(),
+            "--width=40".to_string(),
+            "--min-cols=20".to_string(),
+            "--max-cols=30".to_string(),
+        ];
+        let terminal_dependent_bound = vec!["nyancat".to_string(), "--min-rows=100".to_string()];
+
+        for args in [
+            corrected_bound,
+            overwritten_bounds,
+            mixed_fixed_and_bounds,
+            terminal_dependent_bound,
+        ] {
+            assert!(matches!(parse_args(&args), Ok(CliAction::Run(_))));
+        }
     }
 
     struct Rng(u64);

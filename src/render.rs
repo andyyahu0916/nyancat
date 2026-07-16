@@ -358,7 +358,7 @@ pub(crate) fn run(
         // it. Placed after the frame-limit check so finite runs (smoke tests,
         // goldens) never depend on stdin state.
         if let Some(input) = &mut telnet_input {
-            match input.poll() {
+            match input.poll()? {
                 Some(SessionEvent::Resize(size)) => {
                     state.update_terminal_size(size);
                     telnet_resized = true;
@@ -384,7 +384,7 @@ fn show_intro(out: &mut impl Write, telnet: bool, clear_screen: bool) -> io::Res
         buffer.push_bytes(b"                             \x1b[1mNyancat Telnet Server\x1b[0m");
         buffer.push_newlines(telnet, 2);
         buffer.push_bytes(
-            b"                   written and run by \x1b[1;32mK. Lange\x1b[1;34m @_klange\x1b[0m",
+            b"             original by \x1b[1;32mK. Lange\x1b[0m; Rust edition by \x1b[1;34mAndy\x1b[0m",
         );
         buffer.push_newlines(telnet, 2);
         buffer.push_bytes(b"        If things don't look right, try:");
@@ -397,17 +397,13 @@ fn show_intro(out: &mut impl Write, telnet: bool, clear_screen: bool) -> io::Res
         buffer.push_newlines(telnet, 2);
         buffer.push_bytes(b"        Problems? Check the website:");
         buffer.push_newlines(telnet, 1);
-        buffer.push_bytes(b"                \x1b[1;34mhttp://nyancat.dakko.us\x1b[0m");
+        buffer.push_bytes(b"        \x1b[1;34mhttps://github.com/andyyahu/nyancat-rust\x1b[0m");
         buffer.push_newlines(telnet, 2);
         buffer.push_bytes(b"        This is a telnet server, remember your escape keys!");
         buffer.push_newlines(telnet, 1);
         buffer.push_bytes(b"                \x1b[1;31m^]quit\x1b[0m to exit");
         buffer.push_newlines(telnet, 2);
-        let _ = writeln!(
-            buffer,
-            "        Starting in {}...                ",
-            countdown_clock - k
-        );
+        push_intro_countdown(&mut buffer, telnet, countdown_clock - k);
 
         out.write_all(buffer.as_bytes())?;
         out.flush()?;
@@ -424,6 +420,11 @@ fn show_intro(out: &mut impl Write, telnet: bool, clear_screen: bool) -> io::Res
     }
 
     Ok(())
+}
+
+fn push_intro_countdown(out: &mut FrameBuffer, telnet: bool, count: i32) {
+    let _ = write!(out, "        Starting in {count}...                ");
+    out.push_newlines(telnet, 1);
 }
 
 #[cfg(test)]
@@ -544,6 +545,18 @@ mod tests {
 
         assert!(bytes_contain(&out, b"\r\0\n"));
         assert!(!bytes_contain(&out, b"\n\n"));
+    }
+
+    #[test]
+    fn intro_countdown_uses_telnet_newline() {
+        let mut out = FrameBuffer::with_capacity(64);
+
+        push_intro_countdown(&mut out, true, 5);
+
+        assert_eq!(
+            out.as_bytes(),
+            b"        Starting in 5...                \r\0\n"
+        );
     }
 
     #[test]
